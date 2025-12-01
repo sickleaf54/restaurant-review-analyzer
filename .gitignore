@@ -1,4 +1,4 @@
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
@@ -11,9 +11,9 @@ __pycache__/
 venv/
 env/
 
-# IDE
+# IDE files
 .idea/
 .vscode/
 
-# Mac cruft
+# OS junk
 .DS_Store

@@ -20,7 +20,7 @@ from tensorflow.keras import layers, Model
 # =========================================================
 
 # TODO: change this to your actual CSV path
-CSV_PATH = "/Users/mahatmay/PycharmProjects/review_tagger/Restaurant reviews.csv"   # e.g. "Restaurant reviews.csv"
+CSV_PATH = "Restaurant reviews.csv"   # e.g. "Restaurant reviews.csv"
 
 RANDOM_SEED = 42
 TEST_SIZE = 0.2

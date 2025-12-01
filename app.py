@@ -7,7 +7,7 @@ import streamlit as st
 import tensorflow as tf
 
 # Same CSV path as training
-CSV_PATH = "restaurant_reviews.csv"
+CSV_PATH = "Restaurant reviews.csv"
 MODEL_PATH = "restaurant_review_model.keras"
 
 
