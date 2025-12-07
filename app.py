@@ -1,21 +1,49 @@
+# app.py
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 import tensorflow as tf
 
-# -------------------------------------------------
-# Paths – must match filenames in your repo
-# -------------------------------------------------
 MODEL_PATH = "restaurant_review_model.keras"
-CSV_PATH = "Restaurant reviews.csv"  # <- must match EXACT file name
+CSV_PATH = "Restaurant reviews.csv"  # must match filename exactly
 
 
-# -------------------------------------------------
-# Helpers (must match training pre-processing)
-# -------------------------------------------------
+HEALTH_BAD_WORDS = [
+    "food poisoning",
+    "got sick",
+    "made me sick",
+    "felt sick",
+    "vomit",
+    "vomiting",
+    "nausea",
+    "diarrhea",
+    "diarrhoea",
+    "stomach ache",
+    "stomach cramps",
+    "upset stomach",
+    "undercooked",
+    "raw chicken",
+    "raw meat",
+    "not fully cooked",
+    "smelled bad",
+    "off smell",
+    "rotten",
+    "spoiled",
+    "mold",
+    "mouldy",
+    "dirty kitchen",
+    "unsanitary",
+    "cockroach",
+    "roaches",
+    "rat",
+    "mouse droppings",
+    "hair in food",
+    "found a bug",
+]
+
+
 def clean_text(text: str) -> str:
-    """Lowercase, remove non-letters, collapse spaces."""
     if not isinstance(text, str):
         text = str(text)
     text = text.lower()
@@ -26,21 +54,11 @@ def clean_text(text: str) -> str:
 
 
 def load_and_prepare_data(csv_path: str) -> pd.DataFrame:
-    """Load the CSV and clean the review text (no labels needed for inference)."""
     df = pd.read_csv(csv_path)
-
-    # Drop weird numeric column if present (from your dataset)
     df = df.drop(columns=["7514"], errors="ignore")
-
-    # Remove non-numeric ratings like "Like"
     df = df[df["Rating"] != "Like"].copy()
-
-    # Drop rows without rating or review
     df = df.dropna(subset=["Rating", "Review"])
-
-    # Convert rating to float just in case you need it later
     df["Rating"] = df["Rating"].astype(float)
-
     data = df[["Restaurant", "Reviewer", "Review", "Rating"]].copy()
     data["clean_review"] = data["Review"].apply(clean_text)
     return data
@@ -51,7 +69,6 @@ SERVICE_LABELS = {0: "Bad", 1: "Neutral", 2: "Good"}
 
 
 def summarize_ratio(ratio: float) -> str:
-    """Turn a 0–1 ratio into a qualitative label."""
     if ratio >= 0.8:
         return "High"
     elif ratio >= 0.5:
@@ -60,14 +77,29 @@ def summarize_ratio(ratio: float) -> str:
         return "Low"
 
 
-# -------------------------------------------------
-# Cached loaders (so Cloud doesn't reload every run)
-# -------------------------------------------------
+def interpret_health_label(text: str, p_ok: float) -> str:
+    """
+    Combine model probability + keywords:
+      - p_ok is model's predicted probability that health is OK.
+    """
+    t = text.lower()
+    has_keyword = any(w in t for w in HEALTH_BAD_WORDS)
+
+    # Strongly confident OK
+    if p_ok >= 0.7:
+        return "OK"
+
+    # Strongly low prob + explicit issue keyword
+    if p_ok < 0.4 and has_keyword:
+        return "⚠️ Issue mentioned"
+
+    # Default: don't scream issue unless really obvious
+    return "OK"
+
+
 @st.cache_resource
 def load_model_cached():
-    # Use tf.keras, not standalone keras
-    model = tf.keras.models.load_model(MODEL_PATH)
-    return model
+    return tf.keras.models.load_model(MODEL_PATH)
 
 
 @st.cache_data
@@ -79,11 +111,7 @@ model = load_model_cached()
 data = load_data_cached()
 
 
-# -------------------------------------------------
-# Core analysis
-# -------------------------------------------------
 def analyze_restaurant(restaurant_name: str):
-    # Find rows for this restaurant
     mask = data["Restaurant"].str.contains(restaurant_name, case=False, na=False)
     subset = data[mask].copy()
 
@@ -103,12 +131,9 @@ def analyze_restaurant(restaurant_name: str):
         st.warning("No usable reviews for this restaurant.")
         return
 
-    # 🔑 Make sure we pass a tf.string tensor to the model
     inputs = tf.constant(reviews_clean, dtype=tf.string)
-
     preds = model.predict(inputs, batch_size=32, verbose=0)
 
-    # Keras 3 may return a dict OR a list/tuple, handle both
     if isinstance(preds, dict):
         overall_probs = preds["overall_output"]
         service_probs = preds["service_output"]
@@ -116,31 +141,34 @@ def analyze_restaurant(restaurant_name: str):
         health_probs = preds["health_output"]
         veg_probs = preds["veg_output"]
     else:
-        # Fallback: assume order [overall, service, allergy, health, veg]
         overall_probs, service_probs, allergy_probs, health_probs, veg_probs = preds
 
     overall_pred = overall_probs.argmax(axis=-1)
     service_pred = service_probs.argmax(axis=-1)
     allergy_pred = (allergy_probs >= 0.5).astype(int).ravel()
-    health_pred = (health_probs >= 0.5).astype(int).ravel()
     veg_pred = (veg_probs >= 0.5).astype(int).ravel()
 
     n = len(reviews_clean)
 
-    # Overall sentiment distribution
     overall_counts = np.bincount(overall_pred, minlength=3)
     overall_ratios = overall_counts / n
 
-    # Service sentiment distribution
     service_counts = np.bincount(service_pred, minlength=3)
     service_ratios = service_counts / n
 
-    # Food-friendly ratios
+    # health labels (hybrid)
+    health_labels = []
+    for i in range(n):
+        p_ok = float(health_probs[i][0])
+        lbl = interpret_health_label(reviews_raw[i], p_ok)
+        health_labels.append(lbl)
+    health_ok_ratio = (
+        sum(1 for lbl in health_labels if lbl == "OK") / n if n > 0 else 0.0
+    )
+
     allergy_safe_ratio = float(allergy_pred.mean()) if n > 0 else 0.0
-    health_ok_ratio = float(health_pred.mean()) if n > 0 else 0.0
     veg_friendly_ratio = float(veg_pred.mean()) if n > 0 else 0.0
 
-    # --------- Display results ----------
     st.subheader("Overall Sentiment")
     for i in range(3):
         st.write(
@@ -178,24 +206,22 @@ def analyze_restaurant(restaurant_name: str):
     for i in range(show_n):
         st.markdown(f"**Review {i + 1}:**")
         txt = reviews_raw[i]
-        if len(txt) > 500:
-            txt_short = txt[:500] + " ..."
-        else:
-            txt_short = txt
-
+        txt_short = txt if len(txt) <= 500 else txt[:500] + " ..."
         st.write(txt_short)
+
+        p_ok = float(health_probs[i][0])
+        health_label = interpret_health_label(reviews_raw[i], p_ok)
+
         st.write(
             f"- Overall sentiment: **{OVERALL_LABELS[int(overall_pred[i])]}**\n"
             f"- Service sentiment: **{SERVICE_LABELS[int(service_pred[i])]}**\n"
             f"- Allergy safe: {'Yes' if allergy_pred[i] == 1 else '⚠️ Risk mentioned'}\n"
-            f"- Health standard: {'OK' if health_pred[i] == 1 else '⚠️ Issue mentioned'}\n"
+            f"- Health standard: {health_label}\n"
             f"- Veg friendly: {'Yes' if veg_pred[i] == 1 else 'No / poor options'}"
         )
 
 
-# -------------------------------------------------
-# Streamlit UI
-# -------------------------------------------------
+# -------- Streamlit UI --------
 st.title("Restaurant Review Analyzer")
 
 st.write(
@@ -220,7 +246,7 @@ search_text = st.sidebar.text_input(
 if search_text:
     matches = [r for r in unique_restaurants if search_text.lower() in r.lower()]
 else:
-    matches = unique_restaurants[:50]  # show first 50 as default
+    matches = unique_restaurants[:50]
 
 if not matches:
     st.sidebar.write("No matches. Try a different search.")
