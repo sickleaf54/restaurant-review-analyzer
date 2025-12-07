@@ -1,14 +1,33 @@
-# app.py
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 import tensorflow as tf
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
 
 MODEL_PATH = "restaurant_review_model.keras"
 CSV_PATH = "Restaurant reviews.csv"  # must match filename exactly
 
+# -------------------------------------------------
+# NLTK / VADER set-up
+# -------------------------------------------------
+try:
+    sia = SentimentIntensityAnalyzer()
+except LookupError:
+    nltk.download("vader_lexicon")
+    sia = SentimentIntensityAnalyzer()
 
+
+def vader_compound(text: str) -> float:
+    if not isinstance(text, str):
+        text = str(text)
+    return float(sia.polarity_scores(text)["compound"])
+
+
+# -------------------------------------------------
+# Keyword lists for "mentions"
+# -------------------------------------------------
 HEALTH_BAD_WORDS = [
     "food poisoning",
     "got sick",
@@ -42,7 +61,80 @@ HEALTH_BAD_WORDS = [
     "found a bug",
 ]
 
+ALLERGY_MENTION_WORDS = [
+    "allergy",
+    "allergic",
+    "nut allergy",
+    "tree nut",
+    "peanut",
+    "peanuts",
+    "almond",
+    "walnut",
+    "cashew",
+    "pistachio",
+    "hazelnut",
+    "milk allergy",
+    "dairy allergy",
+    "lactose intolerant",
+    "egg allergy",
+    "fish allergy",
+    "shellfish allergy",
+    "shrimp allergy",
+    "wheat allergy",
+    "gluten allergy",
+    "soy allergy",
+    "sesame allergy",
+    "may contain nuts",
+    "traces of nuts",
+]
 
+VEG_GOOD = [
+    "vegetarian",
+    "vegetarian options",
+    "good for vegetarians",
+    "lots of vegetarian options",
+    "vegan",
+    "vegan options",
+    "vegan friendly",
+    "veg options",
+    "veg friendly",
+    "vegetarian friendly",
+    "plant based",
+    "plant-based",
+    "meatless options",
+    "tofu",
+    "paneer",
+    "lentil curry",
+    "chana masala",
+    "falafel",
+    "salad bar",
+]
+
+VEG_BAD = [
+    "no vegetarian options",
+    "no veg options",
+    "not many veg options",
+    "hardly any veg options",
+    "only meat",
+    "nothing vegetarian",
+    "no vegan options",
+    "not vegan friendly",
+    "limited vegetarian choices",
+    "limited veg choices",
+    "no meatless options",
+    "everything has meat",
+    "all dishes have meat",
+    "not veggie friendly",
+    "poor vegetarian options",
+    "bad for vegetarians",
+]
+
+VEG_MENTION_WORDS = list(set(VEG_GOOD + VEG_BAD))
+
+
+# -------------------------------------------------
+# Basic text clean
+# -------------------------------------------------
 def clean_text(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
@@ -77,26 +169,95 @@ def summarize_ratio(ratio: float) -> str:
         return "Low"
 
 
+# -------------------------------------------------
+# Interpretation helpers
+# -------------------------------------------------
+def overall_from_vader_and_model(text: str, model_probs_row: np.ndarray) -> int:
+    """
+    Decide final overall sentiment mostly from VADER, with model as backup.
+
+    - Strongly positive / negative VADER overrides model.
+    - In the middle range, use the model's prediction.
+    """
+    comp = vader_compound(text)  # -1 .. 1
+    model_label = int(np.argmax(model_probs_row))
+
+    if comp <= -0.5:
+        return 0  # Negative
+    if comp >= 0.5:
+        return 2  # Positive
+
+    # Mild sentiment -> trust the model
+    return model_label
+
+
 def interpret_health_label(text: str, p_ok: float) -> str:
     """
-    Combine model probability + keywords:
-      - p_ok is model's predicted probability that health is OK.
+    Health:
+      - If no health keywords -> 'None mentioned'
+      - If low p_ok and a bad keyword -> '⚠️ Issue mentioned'
+      - If high p_ok -> 'OK'
+      - Else -> 'None mentioned'
     """
     t = text.lower()
     has_keyword = any(w in t for w in HEALTH_BAD_WORDS)
 
-    # Strongly confident OK
+    if not has_keyword:
+        return "None mentioned"
+
     if p_ok >= 0.7:
         return "OK"
 
-    # Strongly low prob + explicit issue keyword
     if p_ok < 0.4 and has_keyword:
         return "⚠️ Issue mentioned"
 
-    # Default: don't scream issue unless really obvious
-    return "OK"
+    return "None mentioned"
 
 
+def interpret_allergy_label(text: str, p_safe: float) -> str:
+    """
+    Allergy:
+      - If no allergy-related words -> 'None mentioned'
+      - Else -> use model to decide Safe / Risk
+    """
+    t = text.lower()
+    has_mention = any(w in t for w in ALLERGY_MENTION_WORDS)
+
+    if not has_mention:
+        return "None mentioned"
+
+    if p_safe >= 0.5:
+        return "Safe"
+    else:
+        return "⚠️ Risk mentioned"
+
+
+def interpret_veg_label(text: str, p_veg_friendly: float) -> str:
+    """
+    Veg:
+      - If no veg-related words -> 'None mentioned'
+      - Else -> model + keywords for Veg-friendly vs Not
+    """
+    t = text.lower()
+    has_mention = any(w in t for w in VEG_MENTION_WORDS)
+
+    if not has_mention:
+        return "None mentioned"
+
+    # If text itself sounds negative about veg
+    if any(w in t for w in VEG_BAD):
+        return "Not veg-friendly"
+
+    # If text sounds positive OR model is confident
+    if any(w in t for w in VEG_GOOD) or p_veg_friendly >= 0.5:
+        return "Veg-friendly"
+
+    return "None mentioned"
+
+
+# -------------------------------------------------
+# Cached model & data
+# -------------------------------------------------
 @st.cache_resource
 def load_model_cached():
     return tf.keras.models.load_model(MODEL_PATH)
@@ -111,6 +272,9 @@ model = load_model_cached()
 data = load_data_cached()
 
 
+# -------------------------------------------------
+# Core analysis
+# -------------------------------------------------
 def analyze_restaurant(restaurant_name: str):
     mask = data["Restaurant"].str.contains(restaurant_name, case=False, na=False)
     subset = data[mask].copy()
@@ -143,33 +307,58 @@ def analyze_restaurant(restaurant_name: str):
     else:
         overall_probs, service_probs, allergy_probs, health_probs, veg_probs = preds
 
-    overall_pred = overall_probs.argmax(axis=-1)
-    service_pred = service_probs.argmax(axis=-1)
-    allergy_pred = (allergy_probs >= 0.5).astype(int).ravel()
-    veg_pred = (veg_probs >= 0.5).astype(int).ravel()
-
     n = len(reviews_clean)
 
-    overall_counts = np.bincount(overall_pred, minlength=3)
+    # ---- Overall sentiment using VADER + model ----
+    overall_final = []
+    for i in range(n):
+        label = overall_from_vader_and_model(reviews_raw[i], overall_probs[i])
+        overall_final.append(label)
+    overall_final = np.array(overall_final, dtype=np.int32)
+
+    overall_counts = np.bincount(overall_final, minlength=3)
     overall_ratios = overall_counts / n
 
+    # ---- Service from model directly ----
+    service_pred = service_probs.argmax(axis=-1)
     service_counts = np.bincount(service_pred, minlength=3)
     service_ratios = service_counts / n
 
-    # health labels (hybrid)
+    # ---- Allergy / Health / Veg with "None mentioned" ----
+    allergy_labels = []
     health_labels = []
+    veg_labels = []
+
     for i in range(n):
-        p_ok = float(health_probs[i][0])
-        lbl = interpret_health_label(reviews_raw[i], p_ok)
-        health_labels.append(lbl)
-    health_ok_ratio = (
-        sum(1 for lbl in health_labels if lbl == "OK") / n if n > 0 else 0.0
+        p_allergy = float(allergy_probs[i][0])
+        p_health_ok = float(health_probs[i][0])
+        p_veg = float(veg_probs[i][0])
+
+        allergy_labels.append(interpret_allergy_label(reviews_raw[i], p_allergy))
+        health_labels.append(interpret_health_label(reviews_raw[i], p_health_ok))
+        veg_labels.append(interpret_veg_label(reviews_raw[i], p_veg))
+
+    # Aggregate only over reviews that actually mention the factor
+    def ratio_from_labels(labels, positive_values):
+        mentioned = [lbl for lbl in labels if lbl != "None mentioned"]
+        if not mentioned:
+            return 0.0, 0, 0
+        pos_count = sum(1 for lbl in mentioned if lbl in positive_values)
+        total = len(mentioned)
+        return pos_count / total, pos_count, total
+
+    allergy_safe_ratio, allergy_safe_count, allergy_total_mentioned = ratio_from_labels(
+        allergy_labels, positive_values={"Safe"}
+    )
+    health_ok_ratio, health_ok_count, health_total_mentioned = ratio_from_labels(
+        health_labels, positive_values={"OK"}
+    )
+    veg_friendly_ratio, veg_friendly_count, veg_total_mentioned = ratio_from_labels(
+        veg_labels, positive_values={"Veg-friendly"}
     )
 
-    allergy_safe_ratio = float(allergy_pred.mean()) if n > 0 else 0.0
-    veg_friendly_ratio = float(veg_pred.mean()) if n > 0 else 0.0
-
-    st.subheader("Overall Sentiment")
+    # --------- Display results ----------
+    st.subheader("Overall Sentiment (VADER + Model)")
     for i in range(3):
         st.write(
             f"{OVERALL_LABELS[i]:>8}: {overall_counts[i]:3d} reviews "
@@ -178,7 +367,7 @@ def analyze_restaurant(restaurant_name: str):
     dominant_overall = OVERALL_LABELS[int(overall_counts.argmax())]
     st.info(f"**Dominant overall sentiment:** {dominant_overall}")
 
-    st.subheader("Service Sentiment")
+    st.subheader("Service Sentiment (Model)")
     for i in range(3):
         st.write(
             f"{SERVICE_LABELS[i]:>8}: {service_counts[i]:3d} reviews "
@@ -188,17 +377,26 @@ def analyze_restaurant(restaurant_name: str):
     st.info(f"**Dominant service sentiment:** {dominant_service}")
 
     st.subheader("Food Friendly Factors")
+
     st.write(
         f"- Allergy safety: **{summarize_ratio(allergy_safe_ratio)}** "
-        f"({allergy_safe_ratio * 100:5.1f}% of reviews predicted safe)"
+        f"({allergy_safe_ratio * 100:5.1f}% of "
+        f"{allergy_total_mentioned} review(s) that mention allergies are predicted safe; "
+        f"{allergy_total_mentioned} of {n} reviews mention allergies)"
     )
+
     st.write(
         f"- Health standards: **{summarize_ratio(health_ok_ratio)}** "
-        f"({health_ok_ratio * 100:5.1f}% of reviews with no issues)"
+        f"({health_ok_ratio * 100:5.1f}% of "
+        f"{health_total_mentioned} review(s) that mention health issues are OK; "
+        f"{health_total_mentioned} of {n} reviews mention health issues)"
     )
+
     st.write(
         f"- Vegetarian friendly: **{summarize_ratio(veg_friendly_ratio)}** "
-        f"({veg_friendly_ratio * 100:5.1f}% of reviews predicted veg-friendly)"
+        f"({veg_friendly_ratio * 100:5.1f}% of "
+        f"{veg_total_mentioned} review(s) that mention veg options are veg-friendly; "
+        f"{veg_total_mentioned} of {n} reviews mention veg options)"
     )
 
     st.subheader("Sample Reviews & Predictions")
@@ -209,28 +407,36 @@ def analyze_restaurant(restaurant_name: str):
         txt_short = txt if len(txt) <= 500 else txt[:500] + " ..."
         st.write(txt_short)
 
-        p_ok = float(health_probs[i][0])
-        health_label = interpret_health_label(reviews_raw[i], p_ok)
+        overall_label = OVERALL_LABELS[int(overall_final[i])]
+        service_label = SERVICE_LABELS[int(service_pred[i])]
+        allergy_label = allergy_labels[i]
+        health_label = health_labels[i]
+        veg_label = veg_labels[i]
 
         st.write(
-            f"- Overall sentiment: **{OVERALL_LABELS[int(overall_pred[i])]}**\n"
-            f"- Service sentiment: **{SERVICE_LABELS[int(service_pred[i])]}**\n"
-            f"- Allergy safe: {'Yes' if allergy_pred[i] == 1 else '⚠️ Risk mentioned'}\n"
-            f"- Health standard: {health_label}\n"
-            f"- Veg friendly: {'Yes' if veg_pred[i] == 1 else 'No / poor options'}"
+            f"- Overall sentiment: **{overall_label}**\n"
+            f"- Service sentiment: **{service_label}**\n"
+            f"- Allergy: {allergy_label}\n"
+            f"- Health: {health_label}\n"
+            f"- Veg options: {veg_label}"
         )
 
 
-# -------- Streamlit UI --------
+# -------------------------------------------------
+# Streamlit UI
+# -------------------------------------------------
 st.title("Restaurant Review Analyzer")
 
 st.write(
     """
-This app uses a multi-output deep learning model trained on restaurant reviews to estimate:
+This app uses a multi-output deep learning model plus NLTK VADER to estimate:
 
-- **Overall sentiment** (positive / neutral / negative)  
-- **Service sentiment** (good / neutral / bad)  
-- **Food-friendly factors** (allergy safety, health standards, vegetarian friendliness)
+- **Overall sentiment** (using VADER + model)  
+- **Service sentiment** (model)  
+- **Food-friendly factors** (allergies, health, vegetarian friendliness)
+
+When a factor (like allergies) is **not mentioned** in a review,
+it is shown as **“None mentioned”** and is **not counted** in that factor's score.
 """
 )
 
