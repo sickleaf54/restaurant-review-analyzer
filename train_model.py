@@ -1,4 +1,3 @@
-# train_model.py
 """
 Train a multi-output restaurant review model and save it.
 
@@ -13,7 +12,13 @@ Outputs:
 import re
 import numpy as np
 import pandas as pd
+
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+)
 
 import tensorflow as tf
 from tensorflow.keras import layers, Model
@@ -418,7 +423,7 @@ def build_model(train_texts: np.ndarray) -> Model:
 
 
 # =========================================================
-# 7. TRAIN MODEL
+# 7. TRAIN MODEL + EVALUATE
 # =========================================================
 
 def train_model(data: pd.DataFrame):
@@ -480,6 +485,74 @@ def train_model(data: pd.DataFrame):
         batch_size=BATCH_SIZE,
         verbose=2,
     )
+
+    # ==============================
+    #  EVALUATION ON HELD-OUT 20%
+    # ==============================
+    print("\n=== EVALUATION ON HELD-OUT SET (20%) ===")
+
+    # Predict on X_val
+    val_preds = model.predict(X_val, batch_size=BATCH_SIZE, verbose=0)
+
+    # Handle dict vs list/tuple outputs
+    if isinstance(val_preds, dict):
+        overall_probs = val_preds["overall_output"]
+        service_probs = val_preds["service_output"]
+        allergy_probs = val_preds["allergy_output"]
+        health_probs = val_preds["health_output"]
+        veg_probs = val_preds["veg_output"]
+    else:
+        overall_probs, service_probs, allergy_probs, health_probs, veg_probs = val_preds
+
+    # -------- Overall sentiment (3-class) --------
+    y_overall_pred = overall_probs.argmax(axis=-1).astype("int32")
+
+    print("\n--- Overall sentiment ---")
+    print("Accuracy:", accuracy_score(y_overall_val, y_overall_pred))
+    print("\nClassification report (overall):")
+    print(classification_report(y_overall_val, y_overall_pred))
+    print("Confusion matrix (overall):")
+    print(confusion_matrix(y_overall_val, y_overall_pred))
+
+    # -------- Service sentiment (3-class) --------
+    y_service_pred = service_probs.argmax(axis=-1).astype("int32")
+
+    print("\n--- Service sentiment ---")
+    print("Accuracy:", accuracy_score(y_service_val, y_service_pred))
+    print("\nClassification report (service):")
+    print(classification_report(y_service_val, y_service_pred))
+    print("Confusion matrix (service):")
+    print(confusion_matrix(y_service_val, y_service_pred))
+
+    # -------- Allergy safety (binary) --------
+    y_allergy_pred = (allergy_probs.flatten() >= 0.5).astype("int32")
+
+    print("\n--- Allergy safety (binary) ---")
+    print("Accuracy:", accuracy_score(y_allergy_val.astype("int32"), y_allergy_pred))
+    print("\nClassification report (allergy):")
+    print(classification_report(y_allergy_val.astype("int32"), y_allergy_pred))
+    print("Confusion matrix (allergy):")
+    print(confusion_matrix(y_allergy_val.astype("int32"), y_allergy_pred))
+
+    # -------- Health standards (binary) --------
+    y_health_pred = (health_probs.flatten() >= 0.5).astype("int32")
+
+    print("\n--- Health standards (binary) ---")
+    print("Accuracy:", accuracy_score(y_health_val.astype("int32"), y_health_pred))
+    print("\nClassification report (health):")
+    print(classification_report(y_health_val.astype("int32"), y_health_pred))
+    print("Confusion matrix (health):")
+    print(confusion_matrix(y_health_val.astype("int32"), y_health_pred))
+
+    # -------- Veg-friendly (binary) --------
+    y_veg_pred = (veg_probs.flatten() >= 0.5).astype("int32")
+
+    print("\n--- Vegetarian-friendly (binary) ---")
+    print("Accuracy:", accuracy_score(y_veg_val.astype("int32"), y_veg_pred))
+    print("\nClassification report (veg-friendly):")
+    print(classification_report(y_veg_val.astype("int32"), y_veg_pred))
+    print("Confusion matrix (veg-friendly):")
+    print(confusion_matrix(y_veg_val.astype("int32"), y_veg_pred))
 
     return model, history
 
