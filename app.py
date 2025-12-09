@@ -292,27 +292,45 @@ def analyze_restaurant(restaurant_name: str):
         st.warning("No usable reviews for this restaurant.")
         return
 
-    # Still use the model, but only for allergy/health/veg
+    # Use the model for allergy/health/veg and for neutral overall/service refinement
     inputs = tf.constant(reviews_clean, dtype=tf.string)
     preds = model.predict(inputs, batch_size=32, verbose=0)
 
     if isinstance(preds, dict):
+        overall_probs = preds["overall_output"]
+        service_probs = preds["service_output"]
         allergy_probs = preds["allergy_output"]
         health_probs = preds["health_output"]
         veg_probs = preds["veg_output"]
     else:
         # assuming model outputs are in fixed order:
         # [overall, service, allergy, health, veg]
-        _, _, allergy_probs, health_probs, veg_probs = preds
+        overall_probs, service_probs, allergy_probs, health_probs, veg_probs = preds
 
     n = len(reviews_clean)
 
-    # ---- Overall & Service sentiment using ONLY VADER ----
+    # ---- Overall & Service sentiment: VADER first, model if VADER says Neutral ----
     compounds = np.array([vader_compound(txt) for txt in reviews_raw], dtype=np.float32)
 
-    # Map VADER compound to 3-class label for both overall and service
-    overall_final = np.array([vader_to_3class(c) for c in compounds], dtype=np.int32)
-    service_pred = np.array([vader_to_3class(c) for c in compounds], dtype=np.int32)
+    overall_final = []
+    service_pred = []
+
+    for i, c in enumerate(compounds):
+        vader_label = vader_to_3class(c)
+
+        if vader_label == 1:  # VADER thinks it's neutral -> ask the model
+            overall_label = int(np.argmax(overall_probs[i]))
+            service_label = int(np.argmax(service_probs[i]))
+        else:
+            # Strongly positive/negative -> trust VADER
+            overall_label = vader_label
+            service_label = vader_label  # service piggybacks on same sentiment when strong
+
+        overall_final.append(overall_label)
+        service_pred.append(service_label)
+
+    overall_final = np.array(overall_final, dtype=np.int32)
+    service_pred = np.array(service_pred, dtype=np.int32)
 
     overall_counts = np.bincount(overall_final, minlength=3)
     overall_ratios = overall_counts / n
@@ -354,7 +372,7 @@ def analyze_restaurant(restaurant_name: str):
     )
 
     # --------- Display results ----------
-    st.subheader("Overall Sentiment (VADER only)")
+    st.subheader("Overall Sentiment")
     for i in range(3):
         st.write(
             f"{OVERALL_LABELS[i]:>8}: {overall_counts[i]:3d} reviews "
@@ -363,7 +381,7 @@ def analyze_restaurant(restaurant_name: str):
     dominant_overall = OVERALL_LABELS[int(overall_counts.argmax())]
     st.info(f"**Dominant overall sentiment:** {dominant_overall}")
 
-    st.subheader("Service Sentiment (VADER only)")
+    st.subheader("Service Sentiment")
     for i in range(3):
         st.write(
             f"{SERVICE_LABELS[i]:>8}: {service_counts[i]:3d} reviews "
@@ -425,11 +443,11 @@ st.title("Restaurant Review Analyzer")
 
 st.write(
     """
-This app uses NLTK VADER plus a multi-output deep learning model to estimate:
+This app estimates, from customer reviews:
 
-- **Overall sentiment** (VADER)  
-- **Service sentiment** (VADER)  
-- **Food-friendly factors** (allergies, health, vegetarian friendliness via model)
+- **Overall sentiment**  
+- **Service sentiment**  
+- **Food-friendly factors** (allergies, health, vegetarian friendliness)
 
 When a factor (like allergies) is **not mentioned** in a review,
 it is shown as **“None mentioned”** and is **not counted** in that factor's score.
