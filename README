@@ -1,0 +1,22 @@
+STEPS TO USE THE APP
+
+# 1. Clone the repo
+git clone https://github.com/sickleaf54/restaurant-review-analyzer.git
+cd restaurant-review-analyzer
+
+# 2. (Optional but good) Create a virtual environment
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS / Linux:
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Run the app
+# If it's a Streamlit app:
+streamlit run app.py
+
+# OR if it's a normal Flask/FastAPI/Gradio script:
+python app.py
