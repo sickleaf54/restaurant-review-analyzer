@@ -172,23 +172,20 @@ def summarize_ratio(ratio: float) -> str:
 # -------------------------------------------------
 # Interpretation helpers
 # -------------------------------------------------
-def overall_from_vader_and_model(text: str, model_probs_row: np.ndarray) -> int:
+def vader_to_3class(compound: float) -> int:
     """
-    Decide final overall sentiment mostly from VADER, with model as backup.
+    Map VADER compound score (-1..1) to 3 classes:
 
-    - Strongly positive / negative VADER overrides model.
-    - In the middle range, use the model's prediction.
+    <= -0.05 -> 0 (Negative / Bad)
+    -0.05 < score < 0.05 -> 1 (Neutral)
+    >= 0.05 -> 2 (Positive / Good)
     """
-    comp = vader_compound(text)  # -1 .. 1
-    model_label = int(np.argmax(model_probs_row))
-
-    if comp <= -0.5:
-        return 0  # Negative
-    if comp >= 0.5:
-        return 2  # Positive
-
-    # Mild sentiment -> trust the model
-    return model_label
+    if compound <= -0.05:
+        return 0
+    elif compound >= 0.05:
+        return 2
+    else:
+        return 1
 
 
 def interpret_health_label(text: str, p_ok: float) -> str:
@@ -295,32 +292,31 @@ def analyze_restaurant(restaurant_name: str):
         st.warning("No usable reviews for this restaurant.")
         return
 
+    # Still use the model, but only for allergy/health/veg
     inputs = tf.constant(reviews_clean, dtype=tf.string)
     preds = model.predict(inputs, batch_size=32, verbose=0)
 
     if isinstance(preds, dict):
-        overall_probs = preds["overall_output"]
-        service_probs = preds["service_output"]
         allergy_probs = preds["allergy_output"]
         health_probs = preds["health_output"]
         veg_probs = preds["veg_output"]
     else:
-        overall_probs, service_probs, allergy_probs, health_probs, veg_probs = preds
+        # assuming model outputs are in fixed order:
+        # [overall, service, allergy, health, veg]
+        _, _, allergy_probs, health_probs, veg_probs = preds
 
     n = len(reviews_clean)
 
-    # ---- Overall sentiment using VADER + model ----
-    overall_final = []
-    for i in range(n):
-        label = overall_from_vader_and_model(reviews_raw[i], overall_probs[i])
-        overall_final.append(label)
-    overall_final = np.array(overall_final, dtype=np.int32)
+    # ---- Overall & Service sentiment using ONLY VADER ----
+    compounds = np.array([vader_compound(txt) for txt in reviews_raw], dtype=np.float32)
+
+    # Map VADER compound to 3-class label for both overall and service
+    overall_final = np.array([vader_to_3class(c) for c in compounds], dtype=np.int32)
+    service_pred = np.array([vader_to_3class(c) for c in compounds], dtype=np.int32)
 
     overall_counts = np.bincount(overall_final, minlength=3)
     overall_ratios = overall_counts / n
 
-    # ---- Service from model directly ----
-    service_pred = service_probs.argmax(axis=-1)
     service_counts = np.bincount(service_pred, minlength=3)
     service_ratios = service_counts / n
 
@@ -358,7 +354,7 @@ def analyze_restaurant(restaurant_name: str):
     )
 
     # --------- Display results ----------
-    st.subheader("Overall Sentiment (VADER + Model)")
+    st.subheader("Overall Sentiment (VADER only)")
     for i in range(3):
         st.write(
             f"{OVERALL_LABELS[i]:>8}: {overall_counts[i]:3d} reviews "
@@ -367,7 +363,7 @@ def analyze_restaurant(restaurant_name: str):
     dominant_overall = OVERALL_LABELS[int(overall_counts.argmax())]
     st.info(f"**Dominant overall sentiment:** {dominant_overall}")
 
-    st.subheader("Service Sentiment (Model)")
+    st.subheader("Service Sentiment (VADER only)")
     for i in range(3):
         st.write(
             f"{SERVICE_LABELS[i]:>8}: {service_counts[i]:3d} reviews "
@@ -429,11 +425,11 @@ st.title("Restaurant Review Analyzer")
 
 st.write(
     """
-This app uses a multi-output deep learning model plus NLTK VADER to estimate:
+This app uses NLTK VADER plus a multi-output deep learning model to estimate:
 
-- **Overall sentiment** (using VADER + model)  
-- **Service sentiment** (model)  
-- **Food-friendly factors** (allergies, health, vegetarian friendliness)
+- **Overall sentiment** (VADER)  
+- **Service sentiment** (VADER)  
+- **Food-friendly factors** (allergies, health, vegetarian friendliness via model)
 
 When a factor (like allergies) is **not mentioned** in a review,
 it is shown as **“None mentioned”** and is **not counted** in that factor's score.
